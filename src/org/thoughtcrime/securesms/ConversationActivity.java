@@ -52,6 +52,8 @@ import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 
+import org.thoughtcrime.securesms.camera.CameraActivity;
+import org.thoughtcrime.securesms.components.ComposeKeyPressedListener;
 import org.thoughtcrime.securesms.database.GroupDatabase;
 import org.thoughtcrime.securesms.logging.Log;
 import android.util.Pair;
@@ -133,6 +135,7 @@ import org.thoughtcrime.securesms.mms.AttachmentManager.MediaType;
 import org.thoughtcrime.securesms.mms.AudioSlide;
 import org.thoughtcrime.securesms.mms.GlideApp;
 import org.thoughtcrime.securesms.mms.GlideRequests;
+import org.thoughtcrime.securesms.mms.ImageSlide;
 import org.thoughtcrime.securesms.mms.LocationSlide;
 import org.thoughtcrime.securesms.mms.MediaConstraints;
 import org.thoughtcrime.securesms.mms.OutgoingExpirationUpdateMessage;
@@ -233,6 +236,8 @@ public class ConversationActivity extends PassphraseRequiredActionBarActivity
   private static final int PICK_LOCATION       = 9;
   private static final int PICK_GIF            = 10;
   private static final int SMS_DEFAULT         = 11;
+  private static final int PICK_CAMERA         = 12;
+  private static final int EDIT_IMAGE          = 13;
 
   private   GlideRequests               glideRequests;
   protected ComposeText                 composeText;
@@ -494,6 +499,27 @@ public class ConversationActivity extends PassphraseRequiredActionBarActivity
       break;
     case SMS_DEFAULT:
       initializeSecurity(isSecureText, isDefaultSms);
+      break;
+    case PICK_CAMERA:
+      int             imgWidth       = data.getIntExtra(CameraActivity.EXTRA_WIDTH, 0);
+      int             imgHeight      = data.getIntExtra(CameraActivity.EXTRA_HEIGHT, 0);
+      long            imgSize        = data.getLongExtra(CameraActivity.EXTRA_SIZE, 0);
+      TransportOption transport      = data.getParcelableExtra(CameraActivity.EXTRA_TRANSPORT);
+      String          message        = data.getStringExtra(CameraActivity.EXTRA_MESSAGE);
+      SlideDeck       slideDeck      = new SlideDeck();
+      long            expiresIn      = recipient.getExpireMessages() * 1000L;
+      int             subscriptionId = sendButton.getSelectedTransport().getSimSubscriptionId().or(-1);
+      boolean         initiating     = threadId == -1;
+
+      if (transport != null) {
+        sendButton.setTransport(transport);
+      } else {
+        transport = sendButton.getSelectedTransport();
+      }
+
+      slideDeck.addSlide(new ImageSlide(this, data.getData(), imgSize, imgWidth, imgHeight));
+
+      sendMediaMessage(transport.isSms(), message, slideDeck, Collections.emptyList(), expiresIn, subscriptionId, initiating);
       break;
     }
   }
@@ -1359,7 +1385,18 @@ public class ConversationActivity extends PassphraseRequiredActionBarActivity
     audioRecorder          = new AudioRecorder(this);
 
     SendButtonListener        sendButtonListener        = new SendButtonListener();
-    ComposeKeyPressedListener composeKeyPressedListener = new ComposeKeyPressedListener();
+    ComposeKeyPressedListener composeKeyPressedListener = new ComposeKeyPressedListener(container, sendButton) {
+      @Override
+      public void textChanged(int lengthBefore) {
+        calculateCharactersRemaining();
+
+        if (composeText.getTextTrimmed().length() == 0 || lengthBefore == 0) {
+          composeText.postDelayed(ConversationActivity.this::updateToggleButtonState, 50);
+        }
+      }
+    };
+
+    composeKeyPressedListener.bind(composeText);
 
     composeText.setOnEditorActionListener(sendButtonListener);
     attachButton.setOnClickListener(new AttachButtonListener());
@@ -1380,12 +1417,7 @@ public class ConversationActivity extends PassphraseRequiredActionBarActivity
     unblockButton.setOnClickListener(v -> handleUnblock());
     makeDefaultSmsButton.setOnClickListener(v -> handleMakeDefaultSms());
     registerButton.setOnClickListener(v -> handleRegisterForSignal());
-
-    composeText.setOnKeyListener(composeKeyPressedListener);
-    composeText.addTextChangedListener(composeKeyPressedListener);
     composeText.setOnEditorActionListener(sendButtonListener);
-    composeText.setOnClickListener(composeKeyPressedListener);
-    composeText.setOnFocusChangeListener(composeKeyPressedListener);
 
     if (QuickAttachmentDrawer.isDeviceSupported(this)) {
       quickAttachmentDrawer.setListener(this);
@@ -2104,21 +2136,18 @@ public class ConversationActivity extends PassphraseRequiredActionBarActivity
   private class QuickCameraToggleListener implements OnClickListener {
     @Override
     public void onClick(View v) {
-      if (!quickAttachmentDrawer.isShowing()) {
-        Permissions.with(ConversationActivity.this)
-                   .request(Manifest.permission.CAMERA)
-                   .ifNecessary()
-                   .withRationaleDialog(getString(R.string.ConversationActivity_to_capture_photos_and_video_allow_signal_access_to_the_camera), R.drawable.ic_photo_camera_white_48dp)
-                   .withPermanentDenialDialog(getString(R.string.ConversationActivity_signal_needs_the_camera_permission_to_take_photos_or_video))
-                   .onAllGranted(() -> {
-                     composeText.clearFocus();
-                     container.show(composeText, quickAttachmentDrawer);
-                   })
-                   .onAnyDenied(() -> Toast.makeText(ConversationActivity.this, R.string.ConversationActivity_signal_needs_camera_permissions_to_take_photos_or_video, Toast.LENGTH_LONG).show())
-                   .execute();
-      } else {
-        container.hideAttachedInput(false);
-      }
+      Permissions.with(ConversationActivity.this)
+                 .request(Manifest.permission.CAMERA)
+                 .ifNecessary()
+                 .withRationaleDialog(getString(R.string.ConversationActivity_to_capture_photos_and_video_allow_signal_access_to_the_camera), R.drawable.ic_photo_camera_white_48dp)
+                 .withPermanentDenialDialog(getString(R.string.ConversationActivity_signal_needs_the_camera_permission_to_take_photos_or_video))
+                 .onAllGranted(() -> {
+                   composeText.clearFocus();
+                   startActivityForResult(CameraActivity.getIntent(ConversationActivity.this, sendButton.getSelectedTransport()), PICK_CAMERA);
+                   overridePendingTransition(R.anim.camera_slide_from_bottom, R.anim.stationary);
+                 })
+                 .onAnyDenied(() -> Toast.makeText(ConversationActivity.this, R.string.ConversationActivity_signal_needs_camera_permissions_to_take_photos_or_video, Toast.LENGTH_LONG).show())
+                 .execute();
     }
   }
 
@@ -2152,49 +2181,6 @@ public class ConversationActivity extends PassphraseRequiredActionBarActivity
     }
   }
 
-  private class ComposeKeyPressedListener implements OnKeyListener, OnClickListener, TextWatcher, OnFocusChangeListener {
-
-    int beforeLength;
-
-    @Override
-    public boolean onKey(View v, int keyCode, KeyEvent event) {
-      if (event.getAction() == KeyEvent.ACTION_DOWN) {
-        if (keyCode == KeyEvent.KEYCODE_ENTER) {
-          if (TextSecurePreferences.isEnterSendsEnabled(ConversationActivity.this)) {
-            sendButton.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER));
-            sendButton.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER));
-            return true;
-          }
-        }
-      }
-      return false;
-    }
-
-    @Override
-    public void onClick(View v) {
-      container.showSoftkey(composeText);
-    }
-
-    @Override
-    public void beforeTextChanged(CharSequence s, int start, int count,int after) {
-      beforeLength = composeText.getTextTrimmed().length();
-    }
-
-    @Override
-    public void afterTextChanged(Editable s) {
-      calculateCharactersRemaining();
-
-      if (composeText.getTextTrimmed().length() == 0 || beforeLength == 0) {
-        composeText.postDelayed(ConversationActivity.this::updateToggleButtonState, 50);
-      }
-    }
-
-    @Override
-    public void onTextChanged(CharSequence s, int start, int before,int count) {}
-
-    @Override
-    public void onFocusChange(View v, boolean hasFocus) {}
-  }
 
   @Override
   public void setThreadId(long threadId) {
